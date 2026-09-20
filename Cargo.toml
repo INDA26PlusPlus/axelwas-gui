@@ -1,0 +1,8 @@
+[package]
+name = "axelwas-gui"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+chess-box = { git = "https://github.com/INDA26PlusPlus/zilian-chess.git" }
+nannou = "0.20.0"
