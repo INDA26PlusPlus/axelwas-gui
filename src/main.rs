@@ -137,11 +137,6 @@ fn draw_pieces(app: &App, model: &Model) {
 }
 
 fn draw_dialog(app: &App, model: &Model) {
-    let pos = match model.dialog_box {
-        None => return,
-        Some(p) => p.0,
-    };
-
     let draw = app.draw();
     draw.rect().color(Color::srgb(0.0, 0.0, 0.0)).x(0.0).y(0.0).w(300.0).h(300.0);
     draw.text("♕ Queen\n♖ Rook\n♘ Knight\n♗ Bishop").font_size(40).x(0.0).y(0.0); 

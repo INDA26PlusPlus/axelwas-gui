@@ -1929,7 +1929,7 @@ dependencies = [
 [[package]]
 name = "chess-box"
 version = "0.1.0"
-source = "git+https://github.com/INDA26PlusPlus/zilian-chess.git#a6252494683c624de38e5210643d546764d6c60a"
+source = "git+https://github.com/INDA26PlusPlus/zilian-chess.git#4246dfb75a256e6aeb974dea1c1af43cdf6f9058"
 
 [[package]]
 name = "clipboard-win"
