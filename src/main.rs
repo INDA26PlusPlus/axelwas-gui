@@ -1,4 +1,4 @@
-use chess_box::pieces::ChessPiece;
+use chess_box::{board::Square, game::MoveError, pieces::{ChessPiece, PieceType}};
 use nannou::prelude::{*};
 
 struct Textures {
@@ -55,7 +55,8 @@ impl Textures {
 struct Model {
     textures: Textures,
     game: chess_box::game::ChessGame,
-    highlighted: Option<(usize, usize)>
+    highlighted: Option<(usize, usize)>,
+    dialog_box: Option<(Square, Square)>
 }
 
 fn main() {
@@ -65,7 +66,7 @@ fn main() {
 fn model(app: &App) -> Model {
     app.new_window().size(720, 720).view(view).build();
 
-    Model { textures: Textures::load(app), game: chess_box::game::ChessGame::new_standard_game(), highlighted: None }
+    Model { textures: Textures::load(app), game: chess_box::game::ChessGame::new_standard_game(), highlighted: None, dialog_box: None }
 }
 
 fn draw_background(app: &App, model: &Model) {
@@ -108,6 +109,8 @@ fn draw_pieces(app: &App, model: &Model) {
     let height = win.top() - win.bottom();
 
 
+    
+
     for c in 0..8 {
         for r in 0..8 {
             let piece = model.game.board().get_piece_file_rank(c, r);
@@ -116,6 +119,14 @@ fn draw_pieces(app: &App, model: &Model) {
                 Some(p) => p
             };
 
+            
+            if piece.is_white() == model.game.is_white_turn() && model.game.in_check() && piece.piece_type() == PieceType::King {
+                draw.ellipse().color(Color::srgba(1.0, 0.0, 0.0, 0.5))
+                    .w(width / 9.0)
+                    .h(height / 9.0)
+                    .x(win.left() + c as f32 * (width / 8.0) + width / 16.0)
+                    .y(win.bottom() + r as f32 * (height / 8.0) + height / 16.0);
+            }
             draw.rect().texture(model.textures.image_from_type(&piece.piece_type(), piece.is_white()))
                 .x(win.left() + c as f32 * (width / 8.0) + width / 16.0)
                 .y(win.bottom() + r as f32 * (height / 8.0) + height / 16.0)
@@ -125,10 +136,61 @@ fn draw_pieces(app: &App, model: &Model) {
     }
 }
 
+fn draw_dialog(app: &App, model: &Model) {
+    let pos = match model.dialog_box {
+        None => return,
+        Some(p) => p.0,
+    };
+
+    let draw = app.draw();
+    draw.rect().color(Color::srgb(0.0, 0.0, 0.0)).x(0.0).y(0.0).w(300.0).h(300.0);
+    draw.text("♕ Queen\n♖ Rook\n♘ Knight\n♗ Bishop").font_size(40).x(0.0).y(0.0); 
+
+}
+
+fn dialog_logic(app: &App, model: &mut Model) {
+    let m = match model.dialog_box {
+        None => return,
+        Some(s) => s
+    };
+    let o = (app.mouse().y / 40.0).floor();
+
+    // model.game.make_promotion_move(start, stop, promotion_choice)
+
+    let promotion_choice = match o {
+        1.0 => PieceType::Queen,
+        0.0 => PieceType::Rook,
+        -1.0 => PieceType::Knight,
+        -2.0 => PieceType::Bishop,
+        _ => return 
+    };
+
+    model.game.make_promotion_move(Some(m.0),Some( m.1), promotion_choice).unwrap();
+    model.dialog_box = None;
+}
+
+fn draw_end(app: &App, model: &Model) {
+    if model.game.in_checkmate() {
+        app.draw().rect().color(Color::BLACK).x(0.0).y(0.0).w(400.0).h(70.0);
+        app.draw().text("CHECKMATE!!").font_size(50).x(0.0).y(0.0);
+    }
+    if model.game.in_stalemate() {
+        app.draw().rect().color(Color::BLACK).x(0.0).y(0.0).w(400.0).h(70.0);
+        app.draw().text("STALEMATE D:").font_size(50).x(0.0).y(0.0);
+    }
+}
+
 fn mouse_logic(app: &App, model: &mut Model) {
+    
     if !app.mouse_buttons().any_just_pressed([MouseButton::Left]) {
         return;
     }
+    match model.dialog_box {
+        Some(_) => { dialog_logic(app, model); return; }
+        None => ()
+    };
+
+
     let pos = app.mouse();
 
     let diff_x = (app.window_rect().left() - pos.x).abs();
@@ -139,9 +201,28 @@ fn mouse_logic(app: &App, model: &mut Model) {
 
     if model.highlighted == Some((column, row)) {
         model.highlighted = None;
-    } else {
-        model.highlighted = Some((column, row));
-    }
+        return;
+    } 
+    let high = match model.highlighted {
+        None => {model.highlighted = Some((column, row)); return;},
+        Some(h) => h, 
+    };
+
+    let from = Square::new_square_from_index(high.0 as i8, high.1 as i8).unwrap();
+    let to = Square::new_square_from_index(column as i8, row as i8).unwrap();
+
+    let result = model.game.make_move(Some(from), Some(to));
+    match result {
+        Err(MoveError::InvalidPromotion) => model.dialog_box = Some((from, to)),
+        Err(_) => {
+            model.highlighted = None;
+            return;
+        }
+        Ok(_) => ()
+    };
+
+    model.highlighted = None;
+
 }
 
 fn view(app: &App, model: &Model) {
@@ -150,6 +231,9 @@ fn view(app: &App, model: &Model) {
 
     draw_pieces(app, model);
 
+    draw_dialog(app, model);
+
+    draw_end(app, model);
 }
 
 fn update(app: &App, model: &mut Model) {
