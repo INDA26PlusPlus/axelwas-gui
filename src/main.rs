@@ -1,7 +1,7 @@
-use std::net::TcpStream;
+use std::{io::Read, net::TcpStream, time::Duration};
 
 use chess_box::{board::Square, game::MoveError, pieces::{ChessPiece, PieceType}};
-use nannou::prelude::{*};
+use nannou::prelude::*;
 
 struct Textures {
     queen_w: Handle<Image>,
@@ -54,8 +54,16 @@ impl Textures {
     }
 }
 
+#[derive(Debug, PartialEq, Eq, Copy, Clone)]
+enum ConnectionState {
+    OurTurn,
+    TheirTurn,
+    Disconnect
+}
+
+
 enum Connection {
-    Open(TcpStream),
+    Open(TcpStream, ConnectionState),
     Dialog(String)
 }
 struct Model {
@@ -260,7 +268,25 @@ fn actualize_connection(model: &mut Model) {
     };
 
     match TcpStream::connect(format!("{}:6767", ip)) {
-        Ok(o) => model.connection = Connection::Open(o),
+        Ok(mut o) => {
+            let mut buf = [2;2];
+            match o.read(&mut buf) {
+                Ok(_) => (),
+                Err(_) => {model.connection = Connection::Dialog("Protocol error.".to_string()); return},
+            };
+            let start_state = if buf == *b"W\n" {
+                ConnectionState::OurTurn
+            } else if buf == *b"B\n" {
+                ConnectionState::TheirTurn
+            } else {
+                model.connection = Connection::Dialog("Protocol error.".to_string());
+                return;
+            };
+
+            o.set_read_timeout(Some(Duration::from_millis(1)));
+
+            model.connection = Connection::Open(o, start_state);
+        },
         Err(e) => model.connection = Connection::Dialog(format!("error while connecting.\n{}", e))
     }
 }
@@ -297,7 +323,34 @@ fn connection_dialog_logic(app: &App, model: &mut Model) {
 
 }
 
+fn their_turn(msg: String, model: &mut Model) {
+
+}
+
 fn connection_connection_logic(model: &mut Model) {
+    let (stream, state) = match &mut model.connection {
+        Connection::Dialog(_) => return,
+        Connection::Open(s, st) => (s, st)
+    };
+
+    match state {
+        ConnectionState::Disconnect => model.connection = Connection::Dialog(String::new()),
+        ConnectionState::OurTurn => {
+
+        },
+        ConnectionState::TheirTurn => {
+            let mut buf = Vec::new();
+
+            let read = stream.read(&mut buf);
+            match read {
+                Err(_) => return,
+                Ok(_) => ()
+            };
+
+            their_turn(String::from_utf8_lossy(&buf).to_string(), model);
+
+        }
+    };
 
 }
 
