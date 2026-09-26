@@ -1,3 +1,5 @@
+use std::net::TcpStream;
+
 use chess_box::{board::Square, game::MoveError, pieces::{ChessPiece, PieceType}};
 use nannou::prelude::{*};
 
@@ -52,11 +54,16 @@ impl Textures {
     }
 }
 
+enum Connection {
+    Open(TcpStream),
+    Dialog(String)
+}
 struct Model {
     textures: Textures,
     game: chess_box::game::ChessGame,
     highlighted: Option<(usize, usize)>,
-    dialog_box: Option<(Square, Square)>
+    dialog_box: Option<(Square, Square)>,
+    connection: Connection,
 }
 
 fn main() {
@@ -66,7 +73,13 @@ fn main() {
 fn model(app: &App) -> Model {
     app.new_window().size(720, 720).view(view).build();
 
-    Model { textures: Textures::load(app), game: chess_box::game::ChessGame::new_standard_game(), highlighted: None, dialog_box: None }
+    Model { 
+        textures: Textures::load(app), 
+        game: chess_box::game::ChessGame::new_standard_game(), 
+        highlighted: None, 
+        dialog_box: None,
+        connection: Connection::Dialog(String::new())
+    }
 }
 
 fn draw_background(app: &App, model: &Model) {
@@ -166,10 +179,24 @@ fn dialog_logic(app: &App, model: &mut Model) {
     model.dialog_box = None;
 }
 
+fn draw_connection_dialog(app: &App, model: &Model) {
+    let draw = app.draw();
+
+    if let Connection::Dialog(text) = &model.connection {
+        draw.rect().color(Color::BLACK).x(0.0).y(0.0).w(400.0).h(400.0);
+        draw.text(format!("Please connect to a server.\naddress: {}", text).as_str()).color(Color::WHITE).font_size(30);
+    }
+}
+
 fn draw_end(app: &App, model: &Model) {
     if model.game.in_checkmate() {
-        app.draw().rect().color(Color::BLACK).x(0.0).y(0.0).w(400.0).h(70.0);
-        app.draw().text("CHECKMATE!!").font_size(50).x(0.0).y(0.0);
+        app.draw().rect().color(Color::BLACK).x(0.0).y(0.0).w(400.0).h(140.0);
+        let color_win = match model.game.is_white_turn() {
+            true => "BLACK",
+            false => "WHITE"
+        };
+        
+        app.draw().text(format!("CHECKMATE!!\n{} WINS!!", color_win).as_str()).font_size(50).x(0.0).y(0.0);
     }
     if model.game.in_stalemate() {
         app.draw().rect().color(Color::BLACK).x(0.0).y(0.0).w(400.0).h(70.0);
@@ -178,7 +205,11 @@ fn draw_end(app: &App, model: &Model) {
 }
 
 fn mouse_logic(app: &App, model: &mut Model) {
-    
+    match model.connection {
+        Connection::Dialog(_) => return,
+        _ => ()
+    };
+
     if !app.mouse_buttons().any_just_pressed([MouseButton::Left]) {
         return;
     }
@@ -222,6 +253,59 @@ fn mouse_logic(app: &App, model: &mut Model) {
 
 }
 
+fn actualize_connection(model: &mut Model) {
+    let ip = match &model.connection {
+        Connection::Dialog(s) => s,
+        _ => return
+    };
+
+    match TcpStream::connect(format!("{}:6767", ip)) {
+        Ok(o) => model.connection = Connection::Open(o),
+        Err(e) => model.connection = Connection::Dialog(format!("error while connecting.\n{}", e))
+    }
+}
+
+fn connection_dialog_logic(app: &App, model: &mut Model) {
+    
+    let text = match &mut model.connection {
+        Connection::Dialog(s) => s,
+        _ => return,
+    };
+
+    macro_rules! a {
+        ($text_to_add:expr) => {
+            *text = format!("{}{}", text, $text_to_add)
+        }
+    }
+
+    match app.keys().get_just_pressed().next() {
+        Some(KeyCode::Digit0) => a!("0"),
+        Some(KeyCode::Digit1) => a!("1"),
+        Some(KeyCode::Digit2) => a!("2"),
+        Some(KeyCode::Digit3) => a!("3"),
+        Some(KeyCode::Digit4) => a!("4"),
+        Some(KeyCode::Digit5) => a!("5"),
+        Some(KeyCode::Digit6) => a!("6"),
+        Some(KeyCode::Digit7) => a!("7"),
+        Some(KeyCode::Digit8) => a!("8"),
+        Some(KeyCode::Digit9) => a!("9"),
+        Some(KeyCode::Period) => a!("."),
+        Some(KeyCode::Backspace) => drop(text.pop()),
+        Some(KeyCode::Enter) => actualize_connection(model),
+        _ => ()
+    };
+
+}
+
+fn connection_connection_logic(model: &mut Model) {
+
+}
+
+fn connection_logic(app: &App, model: &mut Model) {
+    connection_dialog_logic(app, model);
+    connection_connection_logic(model);
+} 
+
 fn view(app: &App, model: &Model) {
 
     draw_background(app, model);
@@ -231,8 +315,12 @@ fn view(app: &App, model: &Model) {
     draw_dialog(app, model);
 
     draw_end(app, model);
+
+    draw_connection_dialog(app, model);
 }
 
 fn update(app: &App, model: &mut Model) {
     mouse_logic(app, model);
+
+    connection_logic(app, model);
 }
