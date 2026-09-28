@@ -1,5 +1,9 @@
+use std::rc::Rc;
+use std::sync::Arc;
 use std::{io::Read, net::TcpStream, time::Duration};
+use std::io::Write;
 
+use chess_box::game::ChessGame;
 use chess_box::{board::Square, game::MoveError, pieces::{ChessPiece, PieceType}};
 use nannou::prelude::*;
 
@@ -54,9 +58,10 @@ impl Textures {
     }
 }
 
-#[derive(Debug, PartialEq, Eq, Copy, Clone)]
+#[derive(Clone, Copy)]
 enum ConnectionState {
     OurTurn,
+    WaitOK(((usize, usize), (usize, usize), Option<PieceType>)),
     TheirTurn,
     Disconnect
 }
@@ -66,10 +71,20 @@ enum Connection {
     Open(TcpStream, ConnectionState),
     Dialog(String)
 }
+
+#[derive(Debug, PartialEq, Clone, Copy)]
+enum MoveState {
+    None,
+    Highlighted((usize, usize)),
+    PendingPromotion(((usize, usize), (usize, usize))),
+    ToMove(((usize, usize), (usize, usize), Option<PieceType>)),
+    Reject
+}
+
 struct Model {
     textures: Textures,
     game: chess_box::game::ChessGame,
-    highlighted: Option<(usize, usize)>,
+    chess_move: MoveState,
     dialog_box: Option<(Square, Square)>,
     connection: Connection,
 }
@@ -84,7 +99,7 @@ fn model(app: &App) -> Model {
     Model { 
         textures: Textures::load(app), 
         game: chess_box::game::ChessGame::new_standard_game(), 
-        highlighted: None, 
+        chess_move: MoveState::None, 
         dialog_box: None,
         connection: Connection::Dialog(String::new())
     }
@@ -109,7 +124,7 @@ fn draw_background(app: &App, model: &Model) {
                 dark
             };
 
-            if Some((c, r)) == model.highlighted {
+            if MoveState::Highlighted((c, r)) == model.chess_move {
                 to_use = highlighted_color;
             }
 
@@ -235,29 +250,34 @@ fn mouse_logic(app: &App, model: &mut Model) {
     let column = (diff_x / (app.window_rect().w() / 8.0)).floor() as usize;
     let row = (diff_y / (app.window_rect().h() / 8.0)).floor() as usize;
 
-    if model.highlighted == Some((column, row)) {
-        model.highlighted = None;
+    if model.chess_move == MoveState::Highlighted((column, row)) {
+        model.chess_move = MoveState::None;
         return;
-    } 
-    let high = match model.highlighted {
-        None => {model.highlighted = Some((column, row)); return;},
-        Some(h) => h, 
+    }     todo!();
+
+    let high = match model.chess_move {
+        MoveState::None => {model.chess_move = MoveState::Highlighted((column, row)); return;},
+        MoveState::Highlighted(h) => h, 
+        MoveState::ToMove((h, _, _)) => return,
+        MoveState::Reject => return,
+        MoveState::PendingPromotion(_) => return,
     };
 
     let from = Square::new_square_from_index(high.0 as i8, high.1 as i8).unwrap();
     let to = Square::new_square_from_index(column as i8, row as i8).unwrap();
 
-    let result = model.game.make_move(Some(from), Some(to));
-    match result {
-        Err(MoveError::InvalidPromotion) => model.dialog_box = Some((from, to)),
-        Err(_) => {
-            model.highlighted = None;
-            return;
-        }
-        Ok(_) => ()
-    };
+    let g_clone = model.game.clone();
 
-    model.highlighted = None;
+    let result = g_clone.make_move(Some(from), Some(to));
+
+    match result {
+        Err(MoveError::InvalidPromotion) => model.chess_move = MoveState::PendingPromotion((high, (column, row))),
+        Err(_) => {
+            model.chess_move = MoveState::None;
+            return;
+        },
+        Ok(_) => model.chess_move = MoveState::ToMove((high, (column, row), None))
+    };
 
 }
 
@@ -323,22 +343,150 @@ fn connection_dialog_logic(app: &App, model: &mut Model) {
 
 }
 
-fn their_turn(msg: String, model: &mut Model) {
+fn their_turn(line: String, model: &mut Model) -> ConnectionState {
+    
 
+    let from = &line[0..2];
+    let to = &line[2..4];
+    let promotion = line.chars().nth(4).unwrap();
+    let board = &line[5..(5 + 64)];
+    
+    let from = match Square::try_from(from) {
+        Ok(s) => s,
+        Err(_) => return ConnectionState::Disconnect,
+    };
+
+    let to = match Square::try_from(to) {
+        Ok(s) => s,
+        Err(_) => return ConnectionState::Disconnect,
+    };
+
+    let promotion = PieceType::try_from(promotion).ok();
+
+    let res;
+    if let Some(promotion) = promotion {
+        res = model.game.make_promotion_move(Some(from), Some(to), promotion);
+    } else {
+        res = model.game.make_move(Some(from), Some(to));
+    }
+
+    let stream = match &mut model.connection {
+        Connection::Open(st, _) => st,
+        _ => return ConnectionState::Disconnect
+    };
+
+
+
+    if res == Ok(()) {
+        let s: String = (*model.game.board()).into();
+        if board.eq(s.as_str()) {
+            match stream.write(b"OK\n") {
+                Err(_) => return ConnectionState::Disconnect,
+                Ok(_) => ()
+            };
+
+            return ConnectionState::OurTurn;
+        }
+    }
+
+    match stream.write(b"REJECT\n") {
+        Err(_) => return ConnectionState::Disconnect,
+        Ok(_) => ()
+    };
+
+    ConnectionState::TheirTurn
+}
+
+fn our_turn(model: &mut Model) -> ConnectionState {
+    let (stream, state) = match &mut model.connection {
+        Connection::Open(st, s) => (st, s),
+        _ => return ConnectionState::Disconnect
+    };
+
+    let (to, from, promotion) = match model.chess_move {
+        MoveState::ToMove((t, f, p)) => (t, f, p),
+        _ => return *state,
+    };
+
+    let to_str: String = Square::new_square_from_index(to.0 as i8, to.1 as i8).unwrap().into();
+    let from_str: String = Square::new_square_from_index(from.0 as i8, from.1 as i8).unwrap().into();
+    let promotion_ch = promotion.map(|p| p.into()).unwrap_or('-');
+    let board_str: String = (*model.game.board()).into();
+    
+    let to_send = format!("{}{}{}{}", to_str, from_str, promotion_ch, board_str);
+
+    match stream.write(to_send.as_bytes()) {
+        Ok(_) => (),
+        Err(_) => return ConnectionState::Disconnect
+    };
+
+    ConnectionState::WaitOK((to, from, promotion))
+}
+
+fn wait_ok(model: &mut Model) -> ConnectionState {
+    let (stream, state) = match &mut model.connection {
+        Connection::Open(st, s) => (st, s),
+        _ => return ConnectionState::Disconnect
+    };
+
+    let (from, to, promotion) = match state {
+        ConnectionState::WaitOK((f, t, p)) => (f, t, p),
+        _ => panic!("IMPOSSIBLE")
+    };
+
+    let mut buf = Vec::new();
+    match stream.read(&mut buf) {
+        Ok(_) => (),
+        Err(_) => return *state,
+    };
+
+    if buf == b"OK\n" {
+        model.chess_move = MoveState::None; 
+
+        let from = Some(Square::new_square_from_index(from.0 as i8, from.1 as i8).unwrap());
+        let to = Some(Square::new_square_from_index(to.0 as i8, to.1 as i8).unwrap());
+
+        match promotion {
+            None => model.game.make_move(from, to).unwrap(),
+            Some(p) => model.game.make_promotion_move(from, to, *p).unwrap(),
+        }
+
+        return ConnectionState::TheirTurn;
+    } else if buf == b"REJECT\n" {
+        model.chess_move = MoveState::Reject;
+
+        return ConnectionState::OurTurn;
+    }
+
+    todo!();
 }
 
 fn connection_connection_logic(model: &mut Model) {
-    let (stream, state) = match &mut model.connection {
+    
+    let state = match model.connection {
         Connection::Dialog(_) => return,
-        Connection::Open(s, st) => (s, st)
+        Connection::Open(_, st) => st
     };
 
-    match state {
-        ConnectionState::Disconnect => model.connection = Connection::Dialog(String::new()),
-        ConnectionState::OurTurn => {
-
+    let to_state = match state {
+        ConnectionState::Disconnect => {
+            model.connection = Connection::Dialog(String::new());
+            return;
         },
+        ConnectionState::OurTurn => {
+            let to_state = our_turn(model);
+            to_state
+        },
+        ConnectionState::WaitOK(_) => {
+            let to_state = wait_ok(model);
+            to_state
+        }
         ConnectionState::TheirTurn => {
+            let stream = match &mut model.connection {
+                Connection::Dialog(_) => return,
+                Connection::Open(st, _) => st
+            };
+
             let mut buf = Vec::new();
 
             let read = stream.read(&mut buf);
@@ -347,9 +495,13 @@ fn connection_connection_logic(model: &mut Model) {
                 Ok(_) => ()
             };
 
-            their_turn(String::from_utf8_lossy(&buf).to_string(), model);
-
+            their_turn(String::from_utf8_lossy(&buf).to_string(), model)
         }
+    };
+
+    model.connection = match &model.connection {
+        Connection::Dialog(_) => return,
+        Connection::Open(s, _st) => Connection::Open(s.try_clone().unwrap(), to_state)
     };
 
 }
