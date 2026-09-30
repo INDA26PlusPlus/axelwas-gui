@@ -69,7 +69,8 @@ enum ConnectionState {
 
 enum Connection {
     Open(TcpStream, ConnectionState),
-    Dialog(String)
+    Dialog(String),
+    EndScreen
 }
 
 #[derive(Debug, PartialEq, Clone, Copy)]
@@ -173,7 +174,10 @@ fn draw_pieces(app: &App, model: &Model) {
 }
 
 fn draw_dialog(app: &App, model: &Model) {
-    match model.dialog_box { None => return, Some(_) => () };
+    match model.chess_move { 
+        MoveState::PendingPromotion(_) => (),
+        _ => return,
+    };
 
     let draw = app.draw();
     draw.rect().color(Color::srgb(0.0, 0.0, 0.0)).x(0.0).y(0.0).w(300.0).h(300.0);
@@ -182,9 +186,9 @@ fn draw_dialog(app: &App, model: &Model) {
 }
 
 fn dialog_logic(app: &App, model: &mut Model) {
-    let m = match model.dialog_box {
-        None => return,
-        Some(s) => s
+    let (from, to) = match model.chess_move {
+        MoveState::PendingPromotion(s) => s,
+        _ => return,
     };
     let o = (app.mouse().y / 40.0).floor();
 
@@ -198,8 +202,8 @@ fn dialog_logic(app: &App, model: &mut Model) {
         _ => return 
     };
 
-    model.game.make_promotion_move(Some(m.0),Some( m.1), promotion_choice).unwrap();
-    model.dialog_box = None;
+    // model.game.make_promotion_move(from, to, promotion_choice).unwrap();
+    model.chess_move = MoveState::ToMove((from, to, Some(promotion_choice)));
 }
 
 fn draw_connection_dialog(app: &App, model: &Model) {
@@ -244,9 +248,9 @@ fn mouse_logic(app: &App, model: &mut Model) {
         _ => ()
     };
 
-    match model.dialog_box {
-        Some(_) => { dialog_logic(app, model); return; }
-        None => ()
+    match model.chess_move {
+        MoveState::PendingPromotion(_) => { dialog_logic(app, model); return; }
+        _ => ()
     };
 
 
@@ -303,9 +307,9 @@ fn actualize_connection(model: &mut Model) {
                 Err(_) => {model.connection = Connection::Dialog("Protocol error.".to_string()); return},
             };
             let start_state = if buf == *b"W\n" {
-                dbg!(ConnectionState::OurTurn)
+                ConnectionState::OurTurn
             } else if buf == *b"B\n" {
-                dbg!(ConnectionState::TheirTurn)
+                ConnectionState::TheirTurn
             } else {
                 model.connection = Connection::Dialog("Protocol error.".to_string());
                 return;
@@ -457,13 +461,20 @@ fn wait_ok(model: &mut Model) -> ConnectionState {
         _ => return ConnectionState::Disconnect("Invalid internal state".to_string())
     };
 
-    let mut buf = [0; 1700];
-    match stream.read(&mut buf) {
-        Ok(_) => (),
-        Err(_) => return state.clone(),
-    };
+    let mut msg = String::new();
 
-    if buf.starts_with(b"OK\n") {
+    let mut buf = [0; 1];
+    while buf != [10] {
+        match stream.read(&mut buf) {
+            Ok(_) => (),
+            Err(_) => return state.clone(),
+        };
+        msg.push(char::from(buf[0]));
+    }
+
+
+
+    if msg.starts_with("OK\n") {
         model.chess_move = MoveState::None; 
 
         let from = Some(Square::new_square_from_index(from.0 as i8, from.1 as i8).unwrap());
@@ -475,16 +486,38 @@ fn wait_ok(model: &mut Model) -> ConnectionState {
         }
 
         return ConnectionState::TheirTurn;
-    } else if buf.starts_with(b"REJECT\n") {
+    } else if msg.starts_with("REJECT\n") {
         model.chess_move = MoveState::Reject;
 
         return ConnectionState::OurTurn;
 
 
 
+    } else if msg.starts_with("CHECKMATE\n") {
+        model.chess_move = MoveState::None; 
+
+        let from = Some(Square::new_square_from_index(from.0 as i8, from.1 as i8).unwrap());
+        let to = Some(Square::new_square_from_index(to.0 as i8, to.1 as i8).unwrap());
+
+        match promotion {
+            None => model.game.make_move(from, to).unwrap(),
+            Some(p) => model.game.make_promotion_move(from, to, *p).unwrap(),
+        }
+
+        return ConnectionState::Disconnect("CHECKMATE".to_string());
+    } else if msg.starts_with("STALEMATE\n") {
+        model.chess_move = MoveState::None; 
+
+        let from = Some(Square::new_square_from_index(from.0 as i8, from.1 as i8).unwrap());
+        let to = Some(Square::new_square_from_index(to.0 as i8, to.1 as i8).unwrap());
+
+        match promotion {
+            None => model.game.make_move(from, to).unwrap(),
+            Some(p) => model.game.make_promotion_move(from, to, *p).unwrap(),
+        }
+
+        return ConnectionState::Disconnect("STALEMATE".to_string());
     } else {
-        println!("{:?}", buf);
-        todo!();
         return ConnectionState::Disconnect("Protocol error must answer OK or REJECT".to_string());
     }
 }
@@ -492,14 +525,22 @@ fn wait_ok(model: &mut Model) -> ConnectionState {
 fn connection_connection_logic(model: &mut Model) {
     
     let state = match &model.connection {
-        Connection::Dialog(_) => return,
-        Connection::Open(_, st) => st
+        Connection::Open(_, st) => st,
+        _ => return,
     };
+
+    dbg!(state);
 
     let to_state = match state {
         ConnectionState::Disconnect(msg) => {
             println!("dissconnecting because of: {}", msg);
-            model.connection = Connection::Dialog(String::new());
+
+            if model.game.in_checkmate() || model.game.in_stalemate() {
+                model.connection = Connection::EndScreen
+            } else {
+                model.connection = Connection::Dialog(String::new());
+            }
+
             return;
         },
         ConnectionState::OurTurn => {
@@ -512,8 +553,8 @@ fn connection_connection_logic(model: &mut Model) {
         }
         ConnectionState::TheirTurn => {
             let stream = match &mut model.connection {
-                Connection::Dialog(_) => return,
-                Connection::Open(st, _) => st
+                Connection::Open(st, _) => st,
+                _ => return,
             };
 
             let mut buf = [0; 1700];
@@ -532,8 +573,8 @@ fn connection_connection_logic(model: &mut Model) {
     };
 
     model.connection = match &model.connection {
-        Connection::Dialog(_) => return,
-        Connection::Open(s, _st) => Connection::Open(s.try_clone().unwrap(), to_state)
+        Connection::Open(s, _st) => Connection::Open(s.try_clone().unwrap(), to_state),
+        _ => return,
     };
 
 }
