@@ -1,9 +1,8 @@
-use std::rc::Rc;
-use std::sync::Arc;
+use std::net::TcpListener;
 use std::{io::Read, net::TcpStream, time::Duration};
 use std::io::Write;
 
-use chess_box::game::ChessGame;
+use chess_box::moves::Move;
 use chess_box::{board::Square, game::MoveError, pieces::{ChessPiece, PieceType}};
 use nannou::prelude::*;
 
@@ -69,6 +68,7 @@ enum ConnectionState {
 
 enum Connection {
     Open(TcpStream, ConnectionState),
+    Listening(TcpListener),
     Dialog(String),
     EndScreen
 }
@@ -86,7 +86,6 @@ struct Model {
     textures: Textures,
     game: chess_box::game::ChessGame,
     chess_move: MoveState,
-    dialog_box: Option<(Square, Square)>,
     connection: Connection,
 }
 
@@ -101,7 +100,6 @@ fn model(app: &App) -> Model {
         textures: Textures::load(app), 
         game: chess_box::game::ChessGame::new_standard_game(), 
         chess_move: MoveState::None, 
-        dialog_box: None,
         connection: Connection::Dialog(String::new())
     }
 }
@@ -212,7 +210,16 @@ fn draw_connection_dialog(app: &App, model: &Model) {
     if let Connection::Dialog(text) = &model.connection {
         draw.rect().color(Color::BLACK).x(0.0).y(0.0).w(400.0).h(400.0);
         draw.text(format!("Please connect to a server.\naddress: {}", text).as_str()).color(Color::WHITE).font_size(30);
+        return;
     }
+
+    match model.connection {
+        Connection::Listening(_) => {
+            draw.rect().color(Color::BLACK).x(0.0).y(0.0).w(400.0).h(200.0);
+            draw.text("Listening on port 6767.\nYou will be white on game start").color(Color::WHITE).font_size(25);
+        },
+        _ => return,
+    };
 }
 
 fn draw_end(app: &App, model: &Model) {
@@ -270,7 +277,7 @@ fn mouse_logic(app: &App, model: &mut Model) {
     let high = match model.chess_move {
         MoveState::None => {model.chess_move = MoveState::Highlighted((column, row)); return;},
         MoveState::Highlighted(h) => h, 
-        MoveState::ToMove((h, _, _)) => return,
+        MoveState::ToMove((_, _, _)) => return,
         MoveState::Reject => return,
         MoveState::PendingPromotion(_) => return,
     };
@@ -299,6 +306,11 @@ fn actualize_connection(model: &mut Model) {
         _ => return
     };
 
+    if ip.len() == 0 {
+        model.connection = Connection::Listening(TcpListener::bind("0.0.0.0:6767").unwrap());
+        return;
+    }
+
     match TcpStream::connect(format!("{}:6767", ip)) {
         Ok(mut o) => {
             let mut buf = [2;2];
@@ -315,12 +327,32 @@ fn actualize_connection(model: &mut Model) {
                 return;
             };
 
-            o.set_read_timeout(Some(Duration::from_millis(1)));
+            o.set_read_timeout(Some(Duration::from_millis(1))).unwrap();
 
             model.connection = Connection::Open(o, start_state);
         },
         Err(e) => model.connection = Connection::Dialog(format!("error while connecting.\n{}", e))
     }
+}
+
+fn listening_logic(model: &mut Model) {
+    let listen = match &mut model.connection {
+        Connection::Listening(l) => l,
+        _ => return,
+    };
+
+    listen.set_nonblocking(true).unwrap();
+
+    let (mut stream, _) = match listen.accept() {
+        Err(_) => return,
+        Ok(s) => s
+    };
+
+    stream.write(b"B\n").unwrap();
+
+    stream.set_read_timeout(Some(Duration::from_millis(1))).unwrap();
+
+    model.connection = Connection::Open(stream, ConnectionState::OurTurn);
 }
 
 fn connection_dialog_logic(app: &App, model: &mut Model) {
@@ -552,6 +584,8 @@ fn connection_connection_logic(model: &mut Model) {
             to_state
         }
         ConnectionState::TheirTurn => {
+            model.chess_move = MoveState::None;
+
             let stream = match &mut model.connection {
                 Connection::Open(st, _) => st,
                 _ => return,
@@ -582,6 +616,7 @@ fn connection_connection_logic(model: &mut Model) {
 fn connection_logic(app: &App, model: &mut Model) {
     connection_dialog_logic(app, model);
     connection_connection_logic(model);
+    listening_logic(model);
 } 
 
 fn draw_reject(app: &App, model: &Model) {
