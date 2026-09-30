@@ -58,12 +58,12 @@ impl Textures {
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Debug, Clone)]
 enum ConnectionState {
     OurTurn,
     WaitOK(((usize, usize), (usize, usize), Option<PieceType>)),
     TheirTurn,
-    Disconnect
+    Disconnect(String)
 }
 
 
@@ -236,6 +236,14 @@ fn mouse_logic(app: &App, model: &mut Model) {
     if !app.mouse_buttons().any_just_pressed([MouseButton::Left]) {
         return;
     }
+    match model.chess_move {
+        MoveState::Reject => {
+            model.chess_move = MoveState::None;
+            return;
+        },
+        _ => ()
+    };
+
     match model.dialog_box {
         Some(_) => { dialog_logic(app, model); return; }
         None => ()
@@ -253,7 +261,7 @@ fn mouse_logic(app: &App, model: &mut Model) {
     if model.chess_move == MoveState::Highlighted((column, row)) {
         model.chess_move = MoveState::None;
         return;
-    }     todo!();
+    }     
 
     let high = match model.chess_move {
         MoveState::None => {model.chess_move = MoveState::Highlighted((column, row)); return;},
@@ -266,7 +274,7 @@ fn mouse_logic(app: &App, model: &mut Model) {
     let from = Square::new_square_from_index(high.0 as i8, high.1 as i8).unwrap();
     let to = Square::new_square_from_index(column as i8, row as i8).unwrap();
 
-    let g_clone = model.game.clone();
+    let mut g_clone = model.game.clone();
 
     let result = g_clone.make_move(Some(from), Some(to));
 
@@ -295,9 +303,9 @@ fn actualize_connection(model: &mut Model) {
                 Err(_) => {model.connection = Connection::Dialog("Protocol error.".to_string()); return},
             };
             let start_state = if buf == *b"W\n" {
-                ConnectionState::OurTurn
+                dbg!(ConnectionState::OurTurn)
             } else if buf == *b"B\n" {
-                ConnectionState::TheirTurn
+                dbg!(ConnectionState::TheirTurn)
             } else {
                 model.connection = Connection::Dialog("Protocol error.".to_string());
                 return;
@@ -353,12 +361,12 @@ fn their_turn(line: String, model: &mut Model) -> ConnectionState {
     
     let from = match Square::try_from(from) {
         Ok(s) => s,
-        Err(_) => return ConnectionState::Disconnect,
+        Err(_) => return ConnectionState::Disconnect("Invalid from square notation".to_string()),
     };
 
     let to = match Square::try_from(to) {
         Ok(s) => s,
-        Err(_) => return ConnectionState::Disconnect,
+        Err(_) => return ConnectionState::Disconnect("invalid to square notation".to_string()),
     };
 
     let promotion = PieceType::try_from(promotion).ok();
@@ -372,7 +380,7 @@ fn their_turn(line: String, model: &mut Model) -> ConnectionState {
 
     let stream = match &mut model.connection {
         Connection::Open(st, _) => st,
-        _ => return ConnectionState::Disconnect
+        _ => return ConnectionState::Disconnect("Dissagreeing internal state".to_string())
     };
 
 
@@ -381,7 +389,7 @@ fn their_turn(line: String, model: &mut Model) -> ConnectionState {
         let s: String = (*model.game.board()).into();
         if board.eq(s.as_str()) {
             match stream.write(b"OK\n") {
-                Err(_) => return ConnectionState::Disconnect,
+                Err(_) => return ConnectionState::Disconnect("Unable to write to stream".to_string()),
                 Ok(_) => ()
             };
 
@@ -390,7 +398,7 @@ fn their_turn(line: String, model: &mut Model) -> ConnectionState {
     }
 
     match stream.write(b"REJECT\n") {
-        Err(_) => return ConnectionState::Disconnect,
+        Err(_) => return ConnectionState::Disconnect("Unable to write to stream".to_string()),
         Ok(_) => ()
     };
 
@@ -400,24 +408,39 @@ fn their_turn(line: String, model: &mut Model) -> ConnectionState {
 fn our_turn(model: &mut Model) -> ConnectionState {
     let (stream, state) = match &mut model.connection {
         Connection::Open(st, s) => (st, s),
-        _ => return ConnectionState::Disconnect
+        _ => return ConnectionState::Disconnect("Invalid internal state".to_string())
     };
 
     let (to, from, promotion) = match model.chess_move {
         MoveState::ToMove((t, f, p)) => (t, f, p),
-        _ => return *state,
+        _ => return state.clone(),
     };
 
     let to_str: String = Square::new_square_from_index(to.0 as i8, to.1 as i8).unwrap().into();
     let from_str: String = Square::new_square_from_index(from.0 as i8, from.1 as i8).unwrap().into();
     let promotion_ch = promotion.map(|p| p.into()).unwrap_or('-');
-    let board_str: String = (*model.game.board()).into();
     
-    let to_send = format!("{}{}{}{}", to_str, from_str, promotion_ch, board_str);
+    let from_sq = Some(Square::new_square_from_index(from.0 as i8, from.1 as i8).unwrap());
+    let to_sq = Some(Square::new_square_from_index(to.0 as i8, to.1 as i8).unwrap());
+
+    let mut game_clone = model.game.clone();
+
+    match promotion {
+        None => game_clone.make_move(to_sq, from_sq).unwrap(),
+        Some(p) => game_clone.make_promotion_move(to_sq, from_sq, p).unwrap(),
+    }
+    
+    
+    let board_str: String = (*game_clone.board()).into();
+    
+
+
+
+    let to_send = format!("{}{}{}{}\n", to_str, from_str, promotion_ch, board_str);
 
     match stream.write(to_send.as_bytes()) {
         Ok(_) => (),
-        Err(_) => return ConnectionState::Disconnect
+        Err(e) => return ConnectionState::Disconnect(format!("Cannot write to strean: {}", e))
     };
 
     ConnectionState::WaitOK((to, from, promotion))
@@ -426,21 +449,21 @@ fn our_turn(model: &mut Model) -> ConnectionState {
 fn wait_ok(model: &mut Model) -> ConnectionState {
     let (stream, state) = match &mut model.connection {
         Connection::Open(st, s) => (st, s),
-        _ => return ConnectionState::Disconnect
+        _ => return ConnectionState::Disconnect("Invalid internal state".to_string())
     };
 
     let (from, to, promotion) = match state {
         ConnectionState::WaitOK((f, t, p)) => (f, t, p),
-        _ => panic!("IMPOSSIBLE")
+        _ => return ConnectionState::Disconnect("Invalid internal state".to_string())
     };
 
-    let mut buf = Vec::new();
+    let mut buf = [0; 1700];
     match stream.read(&mut buf) {
         Ok(_) => (),
-        Err(_) => return *state,
+        Err(_) => return state.clone(),
     };
 
-    if buf == b"OK\n" {
+    if buf.starts_with(b"OK\n") {
         model.chess_move = MoveState::None; 
 
         let from = Some(Square::new_square_from_index(from.0 as i8, from.1 as i8).unwrap());
@@ -452,24 +475,30 @@ fn wait_ok(model: &mut Model) -> ConnectionState {
         }
 
         return ConnectionState::TheirTurn;
-    } else if buf == b"REJECT\n" {
+    } else if buf.starts_with(b"REJECT\n") {
         model.chess_move = MoveState::Reject;
 
         return ConnectionState::OurTurn;
-    }
 
-    todo!();
+
+
+    } else {
+        println!("{:?}", buf);
+        todo!();
+        return ConnectionState::Disconnect("Protocol error must answer OK or REJECT".to_string());
+    }
 }
 
 fn connection_connection_logic(model: &mut Model) {
     
-    let state = match model.connection {
+    let state = match &model.connection {
         Connection::Dialog(_) => return,
         Connection::Open(_, st) => st
     };
 
     let to_state = match state {
-        ConnectionState::Disconnect => {
+        ConnectionState::Disconnect(msg) => {
+            println!("dissconnecting because of: {}", msg);
             model.connection = Connection::Dialog(String::new());
             return;
         },
@@ -487,15 +516,18 @@ fn connection_connection_logic(model: &mut Model) {
                 Connection::Open(st, _) => st
             };
 
-            let mut buf = Vec::new();
+            let mut buf = [0; 1700];
 
             let read = stream.read(&mut buf);
             match read {
                 Err(_) => return,
-                Ok(_) => ()
+                Ok(0) => return,
+                Ok(i) => dbg!(i),
             };
 
-            their_turn(String::from_utf8_lossy(&buf).to_string(), model)
+            let taken_line = String::from_utf8_lossy(&buf).to_string();            
+            println!("{}", taken_line);
+            their_turn(taken_line, model)
         }
     };
 
@@ -511,6 +543,17 @@ fn connection_logic(app: &App, model: &mut Model) {
     connection_connection_logic(model);
 } 
 
+fn draw_reject(app: &App, model: &Model) {
+    match model.chess_move {
+        MoveState::Reject => (),
+        _ => return,
+    }
+
+    let draw = app.draw();
+    draw.rect().w(300.0).h(70.0).color(Color::BLACK).x(0.0).y(0.0);
+    draw.text("REJECTED").font_size(30).x(0.0).y(0.0);
+}
+
 fn view(app: &App, model: &Model) {
 
     draw_background(app, model);
@@ -522,6 +565,8 @@ fn view(app: &App, model: &Model) {
     draw_end(app, model);
 
     draw_connection_dialog(app, model);
+
+    draw_reject(app, model)
 }
 
 fn update(app: &App, model: &mut Model) {
