@@ -388,7 +388,13 @@ fn connection_dialog_logic(app: &App, model: &mut Model) {
 }
 
 fn their_turn(line: String, model: &mut Model) -> ConnectionState {
-    
+    if !line.is_ascii() {
+        return ConnectionState::Disconnect("not ascii".to_string());
+    }
+
+    if line.len() == 2 + 2 + 1 + 64 + 1 {
+        return ConnectionState::Disconnect("not long enough".to_string());
+    }
 
     let from = &line[0..2];
     let to = &line[2..4];
@@ -424,12 +430,24 @@ fn their_turn(line: String, model: &mut Model) -> ConnectionState {
     if res == Ok(()) {
         let s: String = (*model.game.board()).into();
         if board.eq(s.as_str()) {
-            match stream.write(b"OK\n") {
-                Err(_) => return ConnectionState::Disconnect("Unable to write to stream".to_string()),
-                Ok(_) => ()
+
+            let text = if model.game.in_checkmate() {
+                b"CHECKMATE\n"
+            } else if model.game.in_stalemate() {
+                b"STALEMATE\n"
+            } else {
+                match stream.write(b"OK\n") {
+                    Err(_) => return ConnectionState::Disconnect("Unable to write to stream".to_string()),
+                    Ok(_) => ()
+                };
+                return ConnectionState::OurTurn;
             };
 
-            return ConnectionState::OurTurn;
+
+            match stream.write(text) {
+                    Err(_) => return ConnectionState::Disconnect("Unable to write to stream".to_string()),
+                    Ok(_) => return ConnectionState::OurTurn,
+            };
         }
     }
 
@@ -591,7 +609,7 @@ fn connection_connection_logic(model: &mut Model) {
                 _ => return,
             };
 
-            let mut buf = [0; 1700];
+            let mut buf = [0; 1601];
 
             let read = stream.read(&mut buf);
             match read {
